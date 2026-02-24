@@ -3,8 +3,8 @@ name: Scrape METU NCC -> Firestore
 on:
   workflow_dispatch:
   schedule:
-    # Every Monday at 06:00 UTC (Turkey is UTC+3; this is ~09:00 TR)
-    - cron: "0 6 * * 1"
+    # Every Monday at 18:00 UTC (Turkey is UTC+3; this is 21:00 TR)
+    - cron: "0 18 * * 1"
 
 jobs:
   scrape:
