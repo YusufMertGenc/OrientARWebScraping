@@ -305,7 +305,11 @@ def parse_this_week(html: str) -> Dict[str, Any]:
     seen = set()
     uniq = []
     for e in events:
-        k = (e.get("date_text", ""), e.get("time_text", ""), e.get("title", "")).lower()
+        k = (
+            (e.get("date_text") or "").strip().lower(),
+            (e.get("time_text") or "").strip().lower(),
+            (e.get("title") or "").strip().lower(),
+    )
         if k in seen:
             continue
         seen.add(k)
