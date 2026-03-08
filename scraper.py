@@ -68,7 +68,6 @@ def init_firestore_from_b64() -> firestore.Client:
     sa_json = base64.b64decode(sa_b64).decode("utf-8")
     cred = credentials.Certificate(json.loads(sa_json))
 
-    # safe init
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
 
@@ -76,21 +75,12 @@ def init_firestore_from_b64() -> firestore.Client:
 
 
 def _extract_lines(block: BeautifulSoup) -> List[str]:
-    """
-    Get meaningful lines inside a block, preserving line breaks.
-    """
     raw_lines = block.get_text("\n", strip=True).split("\n")
     lines = [clean_text(x) for x in raw_lines]
     return [x for x in lines if x]
 
 
 def _looks_like_event_block(lines: List[str]) -> bool:
-    """
-    Match the actual page style you showed:
-      - starts with dd.mm.yyyy (maybe with day name)
-      - or dd.mm.yyyy – dd.mm.yyyy (range)
-      - often next line contains @HH:MM
-    """
     if not lines:
         return False
     first = lines[0]
@@ -101,31 +91,26 @@ def _looks_like_event_block(lines: List[str]) -> bool:
 
 
 def _parse_time_line(s: str) -> str:
-    # "@20:00" -> "20:00"
     s = clean_text(s)
     s = s.replace("@", "").strip()
     return s
 
 
 def _try_parse_iso(date_line: str, time_line: str) -> Optional[str]:
-    """
-    Try convert:
-      "26.02.2026, Perşembe / Thursday" + "@20:00" -> iso
-      "27.02.2026 – 01.03.2026" -> (no single datetime) None
-    """
-    # If it's a date range, don't force a single datetime
     if re.search(r"\b\d{2}\.\d{2}\.\d{4}\s*[–-]\s*\d{2}\.\d{2}\.\d{4}\b", date_line):
         return None
 
-    # Extract first dd.mm.yyyy
     m = re.search(r"\b(\d{2}\.\d{2}\.\d{4})\b", date_line)
     if not m:
         return None
-    date_part = m.group(1)
 
+    date_part = m.group(1)
     time_part = _parse_time_line(time_line) if time_line else ""
     if not time_part:
         return None
+
+    # Saat aralığı varsa başlangıcı al
+    time_part = re.split(r"\s*[-–]\s*", time_part)[0]
 
     candidate = f"{date_part} {time_part}"
     try:
@@ -136,7 +121,7 @@ def _try_parse_iso(date_line: str, time_line: str) -> Optional[str]:
 
 
 # ---------------------------
-# Parsing: This Week on Campus (FIXED for the real layout)
+# Parsing: This Week on Campus
 # ---------------------------
 def parse_this_week(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
@@ -148,7 +133,19 @@ def parse_this_week(html: str) -> Dict[str, Any]:
     if main:
         h1 = main.find("h1")
         if h1:
-            week_range_text = clean_text(h1.get_text())
+            h1_text = clean_text(h1.get_text())
+            if h1_text and h1_text.lower() != "this week on campus":
+                week_range_text = h1_text
+
+    if not week_range_text:
+        page_text = main.get_text("\n", strip=True) if main else ""
+        m = re.search(
+            r"\b\d{1,2}\s*[-–]\s*\d{1,2}\s+[A-Za-zÇĞİÖŞÜçğıöşü]+\s*/\s*[A-Za-z]+\s+\d{4}\b",
+            page_text,
+            re.UNICODE,
+        )
+        if m:
+            week_range_text = clean_text(m.group(0))
 
     if not main:
         return {
@@ -158,9 +155,14 @@ def parse_this_week(html: str) -> Dict[str, Any]:
             "events": [],
         }
 
-    date_line_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
-    date_range_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\s*[–-]\s*\d{2}\.\d{2}\.\d{4}\b")
+    date_line_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4},?\s*$")
+    date_range_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\s*[–-]\s*\d{2}\.\d{2}\.\d{4}\s*$")
     time_line_re = re.compile(r"^\s*@\s*\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?\s*$")
+    weekday_line_re = re.compile(
+        r"^(Pazartesi|Salı|Çarşamba|Perşembe|Cuma|Cumartesi|Pazar)\s*/\s*"
+        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$",
+        re.I,
+    )
 
     junk_exact = {
         "this week on campus",
@@ -174,38 +176,31 @@ def parse_this_week(html: str) -> Dict[str, Any]:
     }
 
     def is_date_line(line: str) -> bool:
+        line = clean_text(line)
         return bool(date_range_re.match(line) or date_line_re.match(line))
 
     def is_time_line(line: str) -> bool:
-        return bool(time_line_re.match(line))
+        return bool(time_line_re.match(clean_text(line)))
+
+    def is_weekday_line(line: str) -> bool:
+        return bool(weekday_line_re.match(clean_text(line)))
 
     def is_junk_line(line: str) -> bool:
         l = clean_text(line).lower()
+
         if re.fullmatch(r"\d{1,3}", l):
             return True
+
         if l in junk_exact:
             return True
+
         if len(l) <= 1:
             return True
+
         return False
 
     def normalize_iso(date_line: str, time_line: str) -> Optional[str]:
-        if date_range_re.match(date_line):
-            return None
-
-        m = re.search(r"(\d{2}\.\d{2}\.\d{4})", date_line)
-        if not m or not time_line:
-            return None
-
-        date_part = m.group(1)
-        t = clean_text(time_line).replace("@", "").strip()
-        t = re.split(r"\s*[-–]\s*", t)[0]   # start time only
-
-        try:
-            dt = date_parser.parse(f"{date_part} {t}", dayfirst=True, fuzzy=True)
-            return dt.isoformat()
-        except Exception:
-            return None
+        return _try_parse_iso(date_line, time_line)
 
     raw_lines = main.get_text("\n", strip=True).split("\n")
     lines = [clean_text(x) for x in raw_lines]
@@ -214,14 +209,16 @@ def parse_this_week(html: str) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
 
-    def finalize_current():
+    def finalize_current() -> None:
         nonlocal current
         if not current:
             return
+
         if current.get("title"):
             current["description"] = " | ".join(current.get("_desc_lines", []))
             current.pop("_desc_lines", None)
             events.append(current)
+
         current = None
 
     i = 0
@@ -231,17 +228,26 @@ def parse_this_week(html: str) -> Dict[str, Any]:
         if is_date_line(line):
             finalize_current()
 
-            date_text = line
+            date_only_text = clean_text(line)
+            date_text = date_only_text
             time_text = ""
             title = ""
 
             j = i + 1
-            if j < len(lines) and is_time_line(lines[j]):
-                time_text = lines[j]
+
+            # Tarihten sonra gün adı ayrı satırda geliyorsa ekle
+            if j < len(lines) and is_weekday_line(lines[j]):
+                date_text = f"{date_only_text} {clean_text(lines[j])}"
                 j += 1
 
-            if j < len(lines) and not is_date_line(lines[j]):
-                title = lines[j]
+            # Sonra saat satırı
+            if j < len(lines) and is_time_line(lines[j]):
+                time_text = clean_text(lines[j])
+                j += 1
+
+            # Sonra başlık
+            if j < len(lines) and not is_date_line(lines[j]) and not is_weekday_line(lines[j]):
+                title = clean_text(lines[j])
                 j += 1
 
             current = {
@@ -264,7 +270,18 @@ def parse_this_week(html: str) -> Dict[str, Any]:
             current["raw_lines"].append(line)
 
             if not current["location"] and re.search(
-                r"\b(Culture and Convention Center|Amfi|Hall|Library|Cafeteria|Academic Buildings|Seminer|Room)\b",
+                r"\b("
+                r"Culture and Convention Center|"
+                r"Amfi|"
+                r"Hall|"
+                r"Rauf Raif Denktaş|"
+                r"Library|"
+                r"Cafeteria|"
+                r"Academic Buildings|"
+                r"Seminer|"
+                r"Room|"
+                r"T-\d+"
+                r")\b",
                 line,
                 re.I,
             ):
@@ -275,149 +292,16 @@ def parse_this_week(html: str) -> Dict[str, Any]:
     finalize_current()
 
     seen = set()
-    uniq = []
+    uniq: List[Dict[str, Any]] = []
     for e in events:
-        k = (
-            (e.get("date_text") or "").strip().lower(),
-            (e.get("time_text") or "").strip().lower(),
-            (e.get("title") or "").strip().lower(),
+        key = (
+            clean_text(e.get("date_text", "")).lower(),
+            clean_text(e.get("time_text", "")).lower(),
+            clean_text(e.get("title", "")).lower(),
         )
-        if k in seen:
+        if key in seen:
             continue
-        seen.add(k)
-        uniq.append(e)
-
-    def is_date_line(line: str) -> bool:
-        return bool(date_range_re.match(line) or date_line_re.match(line))
-
-    def is_time_line(line: str) -> bool:
-        return bool(time_line_re.match(line))
-
-    def is_junk_line(line: str) -> bool:
-        l = clean_text(line).lower()
-
-        # Single small numbers like "2" (pagination etc.)
-        if re.fullmatch(r"\d{1,3}", l):
-            return True
-
-        # menu-ish items
-        if l in junk_exact:
-            return True
-
-        # lines that are just separators or too short
-        if len(l) <= 1:
-            return True
-
-        return False
-
-    def normalize_iso(date_line: str, time_line: str) -> Optional[str]:
-        # For ranges, don't make single datetime
-        if date_range_re.match(date_line):
-            return None
-        m = re.search(r"(\d{2}\.\d{2}\.\d{4})", date_line)
-        if not m:
-            return None
-        if not time_line:
-            return None
-        date_part = m.group(1)
-        time_part = clean_text(time_line).replace("@", "").strip()
-        try:
-            dt = date_parser.parse(f"{date_part} {time_part}", dayfirst=True, fuzzy=True)
-            return dt.isoformat()
-        except Exception:
-            return None
-
-    # ---- Build a clean line stream from content ----
-    # Using "\n" keeps structure closer to the boxes.
-    raw_lines = main.get_text("\n", strip=True).split("\n")
-    lines = [clean_text(x) for x in raw_lines]
-    lines = [x for x in lines if x and not is_junk_line(x)]
-
-    events: List[Dict[str, Any]] = []
-    current: Optional[Dict[str, Any]] = None
-
-    def finalize_current():
-        nonlocal current
-        if not current:
-            return
-        # Need at least a title
-        if current.get("title"):
-            # fill combined description
-            current["description"] = " | ".join(current.get("_desc_lines", []))
-            current.pop("_desc_lines", None)
-            events.append(current)
-        current = None
-
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
-        if is_date_line(line):
-            # New event begins
-            finalize_current()
-
-            date_text = line
-            time_text = ""
-            title_tr = ""
-            title_en = ""
-
-            # Lookahead: time line may be the next line
-            j = i + 1
-            if j < len(lines) and is_time_line(lines[j]):
-                time_text = lines[j]
-                j += 1
-
-            # Next line = title (must exist)
-            if j < len(lines) and not is_date_line(lines[j]):
-                title_tr = lines[j]
-                j += 1
-
-            title_en = ""
-            current = {
-                "date_text": date_text,
-                "time_text": time_text,
-                "date_time_iso": normalize_iso(date_text, time_text),
-                "title_tr": title_tr,
-                "title_en": title_en,
-                "title": title_tr or title_en,
-                "location": "",
-                "_desc_lines": [],
-                "raw_lines": [],
-            }
-
-            # Advance i to continue collecting description from j
-            i = j
-            continue
-
-        # Collect description lines for current event
-        if current:
-            current["_desc_lines"].append(line)
-            current["raw_lines"].append(line)
-
-            # try detect location line
-            if not current["location"] and re.search(
-                r"\b(Culture and Convention Center|Amfi|Hall|Rauf Raif Denktaş|Library|Cafeteria)\b",
-                line,
-                re.I,
-            ):
-                current["location"] = line
-
-        i += 1
-
-    finalize_current()
-
-    # Dedupe by (date_text, time_text, title)
-    seen = set()
-    uniq = []
-    for e in events:
-        k = (
-            (e.get("date_text") or "").strip().lower(),
-            (e.get("time_text") or "").strip().lower(),
-            (e.get("title") or "").strip().lower(),
-    )
-        if k in seen:
-            continue
-        seen.add(k)
+        seen.add(key)
         uniq.append(e)
 
     return {
@@ -426,6 +310,7 @@ def parse_this_week(html: str) -> Dict[str, Any]:
         "week_range_text": week_range_text,
         "events": uniq,
     }
+
 
 # ---------------------------
 # Parsing: Societies
@@ -448,14 +333,12 @@ def parse_societies(html: str) -> Dict[str, Any]:
 
     societies: List[Dict[str, Any]] = []
 
-    # Strategy A: parse tables (most common for "communication details")
     tables = main.find_all("table") if main else []
     for table in tables:
         rows = table.find_all("tr")
         if not rows:
             continue
 
-        # Extract header cells
         headers = []
         header_row = rows[0].find_all(["th", "td"])
         for cell in header_row:
@@ -486,7 +369,6 @@ def parse_societies(html: str) -> Dict[str, Any]:
                 "raw_text": clean_text(raw_text),
             })
 
-    # Strategy B: if no table societies, try headings blocks
     if not societies and main:
         for h in main.find_all(["h2", "h3", "h4"]):
             name = clean_text(h.get_text())
@@ -517,7 +399,6 @@ def parse_societies(html: str) -> Dict[str, Any]:
                 "raw_text": raw,
             })
 
-    # Dedupe by slug
     seen = set()
     uniq: List[Dict[str, Any]] = []
     for s in societies:
@@ -627,6 +508,11 @@ def main() -> None:
     try:
         this_week_html = request_html(THIS_WEEK_URL)
         this_week_payload = parse_this_week(this_week_html)
+
+        print("EVENT COUNT =", len(this_week_payload.get("events", [])))
+        for e in this_week_payload.get("events", []):
+            print(f'{e["date_text"]} | {e["time_text"]} | {e["title"]}')
+
         doc_id, wrote = upsert_week_events(db, this_week_payload)
         status["wrote"]["this_week"] = {
             "doc_id": doc_id,
