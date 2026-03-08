@@ -429,11 +429,11 @@ def set_meta(db: firestore.Client, meta: Dict[str, Any]) -> None:
 
 def upsert_week_events(db: firestore.Client, payload: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Document id: derived from week_range_text if possible, else "current"
+    Always writes into a single fixed document:
+      campus_events_weeks/this-week-on-campus
     Returns (doc_id, wrote?)
     """
-    week_key = payload.get("week_range_text") or "current"
-    doc_id = slugify(week_key)[:120] or "current"
+    doc_id = "this-week-on-campus"
 
     data = {
         "source_url": payload["source_url"],
@@ -450,12 +450,15 @@ def upsert_week_events(db: firestore.Client, payload: Dict[str, Any]) -> Tuple[s
     if old_hash == new_hash:
         return doc_id, False
 
-    db.collection(COL_EVENTS).document(doc_id).set(data, merge=True)
+    # same doc üzerine komple yaz
+    db.collection(COL_EVENTS).document(doc_id).set(data)
+
     set_meta(db, {
         "this_week_hash": new_hash,
         "this_week_doc_id": doc_id,
         "this_week_last_success": utc_now_iso(),
     })
+
     return doc_id, True
 
 
