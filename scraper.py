@@ -144,7 +144,6 @@ def parse_this_week(html: str) -> Dict[str, Any]:
 
     page_title = clean_text(soup.title.get_text()) if soup.title else "This Week on Campus"
 
-    # Week header: prefer h1 text if present
     week_range_text = ""
     if main:
         h1 = main.find("h1")
@@ -159,10 +158,9 @@ def parse_this_week(html: str) -> Dict[str, Any]:
             "events": [],
         }
 
-    # ---- helpers ----
     date_line_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
     date_range_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\s*[–-]\s*\d{2}\.\d{2}\.\d{4}\b")
-    time_line_re = re.compile(r"^\s*@\s*\d{1,2}:\d{2}\s*$")
+    time_line_re = re.compile(r"^\s*@\s*\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?\s*$")
 
     junk_exact = {
         "this week on campus",
@@ -173,8 +171,121 @@ def parse_this_week(html: str) -> Dict[str, Any]:
         "framework directive",
         "forms",
         "contact",
-        "culture and convention center",
     }
+
+    def is_date_line(line: str) -> bool:
+        return bool(date_range_re.match(line) or date_line_re.match(line))
+
+    def is_time_line(line: str) -> bool:
+        return bool(time_line_re.match(line))
+
+    def is_junk_line(line: str) -> bool:
+        l = clean_text(line).lower()
+        if re.fullmatch(r"\d{1,3}", l):
+            return True
+        if l in junk_exact:
+            return True
+        if len(l) <= 1:
+            return True
+        return False
+
+    def normalize_iso(date_line: str, time_line: str) -> Optional[str]:
+        if date_range_re.match(date_line):
+            return None
+
+        m = re.search(r"(\d{2}\.\d{2}\.\d{4})", date_line)
+        if not m or not time_line:
+            return None
+
+        date_part = m.group(1)
+        t = clean_text(time_line).replace("@", "").strip()
+        t = re.split(r"\s*[-–]\s*", t)[0]   # start time only
+
+        try:
+            dt = date_parser.parse(f"{date_part} {t}", dayfirst=True, fuzzy=True)
+            return dt.isoformat()
+        except Exception:
+            return None
+
+    raw_lines = main.get_text("\n", strip=True).split("\n")
+    lines = [clean_text(x) for x in raw_lines]
+    lines = [x for x in lines if x and not is_junk_line(x)]
+
+    events: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+
+    def finalize_current():
+        nonlocal current
+        if not current:
+            return
+        if current.get("title"):
+            current["description"] = " | ".join(current.get("_desc_lines", []))
+            current.pop("_desc_lines", None)
+            events.append(current)
+        current = None
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if is_date_line(line):
+            finalize_current()
+
+            date_text = line
+            time_text = ""
+            title = ""
+
+            j = i + 1
+            if j < len(lines) and is_time_line(lines[j]):
+                time_text = lines[j]
+                j += 1
+
+            if j < len(lines) and not is_date_line(lines[j]):
+                title = lines[j]
+                j += 1
+
+            current = {
+                "date_text": date_text,
+                "time_text": time_text,
+                "date_time_iso": normalize_iso(date_text, time_text),
+                "title": title,
+                "title_tr": title,
+                "title_en": "",
+                "location": "",
+                "_desc_lines": [],
+                "raw_lines": [],
+            }
+
+            i = j
+            continue
+
+        if current:
+            current["_desc_lines"].append(line)
+            current["raw_lines"].append(line)
+
+            if not current["location"] and re.search(
+                r"\b(Culture and Convention Center|Amfi|Hall|Library|Cafeteria|Academic Buildings|Seminer|Room)\b",
+                line,
+                re.I,
+            ):
+                current["location"] = line
+
+        i += 1
+
+    finalize_current()
+
+    seen = set()
+    uniq = []
+    for e in events:
+        k = (
+            (e.get("date_text") or "").strip().lower(),
+            (e.get("time_text") or "").strip().lower(),
+            (e.get("title") or "").strip().lower(),
+        )
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(e)
 
     def is_date_line(line: str) -> bool:
         return bool(date_range_re.match(line) or date_line_re.match(line))
@@ -261,13 +372,7 @@ def parse_this_week(html: str) -> Dict[str, Any]:
                 title_tr = lines[j]
                 j += 1
 
-            # Optional EN title: if it contains A-Z and doesn't contain Turkish chars heavily
-            if j < len(lines) and not is_date_line(lines[j]):
-                cand = lines[j]
-                if re.search(r"[A-Za-z]", cand) and not re.search(r"[ğĞüÜşŞıİöÖçÇ]", cand):
-                    title_en = cand
-                    j += 1
-
+            title_en = ""
             current = {
                 "date_text": date_text,
                 "time_text": time_text,
