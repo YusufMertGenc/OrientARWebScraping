@@ -93,6 +93,7 @@ def _looks_like_event_block(lines: List[str]) -> bool:
 def _parse_time_line(s: str) -> str:
     s = clean_text(s)
     s = s.replace("@", "").strip()
+    s = s.replace(".", ":")
     return s
 
 
@@ -100,7 +101,7 @@ def _try_parse_iso(date_line: str, time_line: str) -> Optional[str]:
     if re.search(r"\b\d{2}\.\d{2}\.\d{4}\s*[–-]\s*\d{2}\.\d{2}\.\d{4}\b", date_line):
         return None
 
-    m = re.search(r"\b(\d{2}\.\d{2}\.\d{4})\b", date_line)
+    m = re.search(r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b", date_line)
     if not m:
         return None
 
@@ -155,41 +156,95 @@ def parse_this_week(html: str) -> Dict[str, Any]:
             "events": [],
         }
 
-    date_line_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4},?\s*$")
-    date_range_re = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\s*[–-]\s*\d{2}\.\d{2}\.\d{4}\s*$")
-    time_line_re = re.compile(r"^\s*@\s*\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?\s*$")
-    weekday_line_re = re.compile(
-        r"^(Pazartesi|Salı|Çarşamba|Perşembe|Cuma|Cumartesi|Pazar)\s*/\s*"
-        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$",
-        re.I,
-    )
+    def is_footer(line: str) -> bool:
+        l = clean_text(line).lower()
+        return (
+            l.startswith("©")
+            or "middle east technical university northern cyprus campus" in l
+        )
 
-    junk_exact = {
-        "this week on campus",
-        "event calendar",
-        "live chat",
-        "student societies",
-        "general rules",
-        "framework directive",
-        "forms",
-        "contact",
-    }
-
-    def is_date_line(line: str) -> bool:
+    def normalize_line(line: str) -> str:
         line = clean_text(line)
-        return bool(date_range_re.match(line) or date_line_re.match(line))
 
-    def is_time_line(line: str) -> bool:
-        return bool(time_line_re.match(clean_text(line)))
+        # Saat bazen @18.00 bazen @18:00 geliyor.
+        # Bunu tek formata çeviriyoruz.
+        if re.fullmatch(r"@\s*\d{1,2}\.\d{2}(?:\s*[-–]\s*\d{1,2}\.\d{2})?", line):
+            line = line.replace(".", ":")
 
-    def is_weekday_line(line: str) -> bool:
-        return bool(weekday_line_re.match(clean_text(line)))
+        return line
 
-    def is_junk_line(line: str) -> bool:
+    def is_full_date(line: str) -> bool:
+        line = clean_text(line)
+        return bool(
+            re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4},?", line)
+            or re.fullmatch(
+                r"\d{1,2}\.\d{1,2}\.\d{4}\s*[–-]\s*\d{1,2}\.\d{1,2}\.\d{4}",
+                line,
+            )
+        )
+
+    def is_partial_date(line: str) -> bool:
+        return bool(re.fullmatch(r"\d{1,2}\.\d{1,2}\.", clean_text(line)))
+
+    def is_year(line: str) -> bool:
+        return bool(re.fullmatch(r"20\d{2}", clean_text(line)))
+
+    def is_time(line: str) -> bool:
+        line = normalize_line(line)
+        return bool(
+            re.fullmatch(
+                r"@\s*\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?",
+                line,
+            )
+        )
+
+    def normalize_time(line: str) -> str:
+        line = normalize_line(line)
+        line = line.replace(" ", "")
+        return line
+
+    def is_weekday(line: str) -> bool:
         l = clean_text(line).lower()
 
-        if re.fullmatch(r"\d{1,3}", l):
+        weekdays = {
+            "pazartesi",
+            "salı",
+            "sali",
+            "çarşamba",
+            "carsamba",
+            "perşembe",
+            "persembe",
+            "cuma",
+            "cumartesi",
+            "pazar",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        }
+
+        parts = [p.strip() for p in l.split("/")]
+        return any(p in weekdays for p in parts)
+
+    def is_junk(line: str) -> bool:
+        l = clean_text(line).lower()
+
+        if not l:
             return True
+
+        junk_exact = {
+            "this week on campus",
+            "event calendar",
+            "live chat",
+            "student societies",
+            "general rules",
+            "framework directive",
+            "forms",
+            "contact",
+        }
 
         if l in junk_exact:
             return True
@@ -199,54 +254,110 @@ def parse_this_week(html: str) -> Dict[str, Any]:
 
         return False
 
+    def normalize_lines(raw_lines: List[str]) -> List[str]:
+        cleaned = [normalize_line(x) for x in raw_lines]
+        cleaned = [x for x in cleaned if x and not is_junk(x)]
+
+        result: List[str] = []
+        i = 0
+
+        while i < len(cleaned):
+            line = cleaned[i]
+
+            if is_footer(line):
+                break
+
+            # Bazı haftalarda tarih böyle bölünüyor:
+            # 10.05.
+            # 2026
+            if is_partial_date(line) and i + 1 < len(cleaned) and is_year(cleaned[i + 1]):
+                result.append(f"{line}{cleaned[i + 1]}")
+                i += 2
+                continue
+
+            # Bazı başlıklarda 18 + th ayrı geliyor.
+            # Bunu başlığın içine geri birleştiriyoruz.
+            if re.fullmatch(r"\d{1,2}", line) and i + 1 < len(cleaned):
+                suffix = cleaned[i + 1].lower()
+                if suffix in {"st", "nd", "rd", "th"}:
+                    result.append(f"{line}{suffix}")
+                    i += 2
+                    continue
+
+            result.append(line)
+            i += 1
+
+        return result
+
     def normalize_iso(date_line: str, time_line: str) -> Optional[str]:
         return _try_parse_iso(date_line, time_line)
 
     raw_lines = main.get_text("\n", strip=True).split("\n")
-    lines = [clean_text(x) for x in raw_lines]
-    lines = [x for x in lines if x and not is_junk_line(x)]
+    lines = normalize_lines(raw_lines)
 
     events: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
 
     def finalize_current() -> None:
         nonlocal current
+
         if not current:
             return
 
-        if current.get("title"):
-            current["description"] = " | ".join(current.get("_desc_lines", []))
-            current.pop("_desc_lines", None)
+        desc_lines = current.get("_desc_lines", [])
+        title = clean_text(current.get("title", ""))
+
+        # Eğer title boş kalmışsa ilk açıklama satırını title yap.
+        if not title and desc_lines:
+            title = desc_lines.pop(0)
+            current["title"] = title
+            current["title_tr"] = title
+
+        # Dinamik yaklaşım:
+        # Location kelimesi aramıyoruz.
+        # Description'ın son satırını location kabul ediyoruz.
+        # Ama description içinde de bırakıyoruz ki veri kaybı olmasın.
+        if desc_lines:
+            current["location"] = desc_lines[-1]
+        else:
+            current["location"] = ""
+
+        current["description"] = " | ".join(desc_lines)
+        current.pop("_desc_lines", None)
+
+        if current.get("date_text") and current.get("title"):
             events.append(current)
 
         current = None
 
     i = 0
+
     while i < len(lines):
         line = lines[i]
 
-        if is_date_line(line):
+        # Event sadece tarih görünce başlar.
+        # Sonraki tarihe kadar olan her şey bu event'indir.
+        if is_full_date(line):
             finalize_current()
 
-            date_only_text = clean_text(line)
-            date_text = date_only_text
+            date_text = clean_text(line)
             time_text = ""
             title = ""
 
             j = i + 1
 
-            # Tarihten sonra gün adı ayrı satırda geliyorsa ekle
-            if j < len(lines) and is_weekday_line(lines[j]):
-                date_text = f"{date_only_text} {clean_text(lines[j])}"
+            # date -> weekday
+            if j < len(lines) and is_weekday(lines[j]):
+                date_text = f"{date_text} {clean_text(lines[j])}"
                 j += 1
 
-            # Sonra saat satırı
-            if j < len(lines) and is_time_line(lines[j]):
-                time_text = clean_text(lines[j])
+            # date -> weekday -> time
+            if j < len(lines) and is_time(lines[j]):
+                time_text = normalize_time(lines[j])
                 j += 1
 
-            # Sonra başlık
-            if j < len(lines) and not is_date_line(lines[j]) and not is_weekday_line(lines[j]):
+            # date -> weekday -> time -> title
+            if j < len(lines) and not is_full_date(lines[j]):
                 title = clean_text(lines[j])
                 j += 1
 
@@ -266,41 +377,36 @@ def parse_this_week(html: str) -> Dict[str, Any]:
             continue
 
         if current:
-            current["_desc_lines"].append(line)
-            current["raw_lines"].append(line)
-
-            if not current["location"] and re.search(
-                r"\b("
-                r"Culture and Convention Center|"
-                r"Amfi|"
-                r"Hall|"
-                r"Rauf Raif Denktaş|"
-                r"Library|"
-                r"Cafeteria|"
-                r"Academic Buildings|"
-                r"Seminer|"
-                r"Room|"
-                r"T-\d+"
-                r")\b",
-                line,
-                re.I,
-            ):
-                current["location"] = line
+            # Bazı HTML durumlarında saat tarih/gün sonrası değil de title civarında gelebilir.
+            # Eğer event'in saati yoksa ve bu satır saatse time_text'e koy.
+            if not current.get("time_text") and is_time(line):
+                current["time_text"] = normalize_time(line)
+                current["date_time_iso"] = normalize_iso(
+                    current.get("date_text", ""),
+                    current.get("time_text", ""),
+                )
+            else:
+                current["_desc_lines"].append(line)
+                current["raw_lines"].append(line)
 
         i += 1
 
     finalize_current()
 
+    # Duplicate temizliği
     seen = set()
     uniq: List[Dict[str, Any]] = []
+
     for e in events:
         key = (
             clean_text(e.get("date_text", "")).lower(),
             clean_text(e.get("time_text", "")).lower(),
             clean_text(e.get("title", "")).lower(),
         )
+
         if key in seen:
             continue
+
         seen.add(key)
         uniq.append(e)
 
