@@ -348,9 +348,17 @@ def parse_this_week(html: str) -> Dict[str, Any]:
 
             # date -> weekday
             if j < len(lines) and is_weekday(lines[j]):
-                date_text = f"{date_text} {clean_text(lines[j])}"
+                weekday_text = clean_text(lines[j])
                 j += 1
 
+                # Bazı HTML durumlarında gün iki satıra bölünüyor:
+                # Çarşamba /
+                # Wednesday
+                if weekday_text.endswith("/") and j < len(lines) and is_weekday(lines[j]):
+                    weekday_text = f"{weekday_text} {clean_text(lines[j])}"
+                    j += 1
+
+                date_text = f"{date_text} {weekday_text}"
             # date -> weekday -> time
             if j < len(lines) and is_time(lines[j]):
                 time_text = normalize_time(lines[j])
